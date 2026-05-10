@@ -1,1 +1,4 @@
 .vscode/settings.json
+
+# Python
+fastapi_intro/__pycache__
