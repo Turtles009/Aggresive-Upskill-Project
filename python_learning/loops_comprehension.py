@@ -32,15 +32,64 @@ users = [
     {"name": "Cyrus", "age": 40, "active": True},
 ]
 
+products = [
+    {"name": "Mango", "price": 50, "in_stock": True},
+    {"name": "Apple", "price": 30, "in_stock": False},
+    {"name": "Banana", "price": 10, "in_stock": True},
+    {"name": "Kiwi", "price": 60, "in_stock": False},
+]
+
 
 def main():
-    print([len(word) for word in words])
-    print([word for word in words if len(word) > 5])
-    print([word.upper() for word in words if word[0] in ("a", "e")])
-    print({word: len(word) for id, word in words})
-    print({word[0] for word in words})
-    print([user["name"] for user in users if user["active"]])
-    print({user["name"]: user["age"] for user in users if user["age"] > 28})
+    print(type({}))
+    print(type({"a"}))
+    print(type({"a": 1}))
+    print(type({1, 2, 3}))
+    print(type({}))
+    print({} == set())
+    print({} == dict())
+    # print([len(word) for word in words])
+    # print([word for word in words if len(word) > 5])
+    # print([word.upper() for word in words if word[0] in ("a", "e")])
+    # print({word: len(word) for id, word in words})
+    # print({word[0] for word in words})
+    # print([user["name"] for user in users if user["active"]])
+    # print({user["name"]: user["age"] for user in users if user["age"] > 28})
+    # print([product for product in products if product["price"] < 50])
+    # print(
+    #     [
+    #         product
+    #         for product in products
+    #         if product["price"] < 50 and product["in_stock"]
+    #     ]
+    # )
+    # print(
+    #     [
+    #         product
+    #         for product in products
+    #         if product["price"] < 50 or product["in_stock"]
+    #     ]
+    # )
+
+    # print(list_products_max_price(products=products, max_price=40))
+    # print(list_products_in_stock(products=products))
+
+
+def list_products_max_price(products: list[dict], max_price: float | None = None):
+    return [
+        product
+        for product in products
+        if product["in_stock"] and (max_price is None or product["price"] < max_price)
+    ]
+
+
+def list_products_in_stock(products: list[dict], name_contains: str | None = None):
+    return [
+        product
+        for product in products
+        if product["in_stock"]
+        and (name_contains is None or name_contains in product["name"])
+    ]
 
 
 if __name__ == "__main__":
