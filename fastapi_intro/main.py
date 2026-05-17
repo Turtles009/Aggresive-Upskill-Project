@@ -2,9 +2,11 @@ from fastapi import FastAPI
 from fastapi import HTTPException, status
 from pydantic import BaseModel
 from endpoints import books
+from services.database import Base, engine
 
 app = FastAPI()
 app.include_router(books.router)
+Base.metadata.create_all(engine)
 
 
 class Note(BaseModel):

@@ -1,6 +1,9 @@
 from fastapi import APIRouter, status, HTTPException, Depends, Header
 from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from services.database import get_db, BookDB
 
 
 class Book(BaseModel):
@@ -70,9 +73,12 @@ class BookUpdate(BaseModel):
 
 
 class BookPublic(BaseModel):
+    id: int
     title: str
     author: str
     year: int
+
+    model_config = {"from_attributes": True}
 
 
 class PaginationParams(BaseModel):
@@ -82,17 +88,15 @@ class PaginationParams(BaseModel):
 
 router = APIRouter(prefix="/books", tags=["books"])
 
-books_db: dict[int, Book] = {}
-next_id = 1
 
-
-def get_book_or_404(book_id: int) -> Book:
-    if book_id not in books_db:
+def get_book_or_404(book_id: int, db: Session = Depends(get_db)) -> BookDB:
+    book = db.get(BookDB, book_id)
+    if book is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No book found with id {book_id}.",
         )
-    return books_db[book_id]
+    return book
 
 
 def pagination(limit: int = 10, offset: int = 0) -> PaginationParams:
@@ -107,18 +111,22 @@ def get_current_user(x_user_id: str | None = Header(default=None)):
     return x_user_id
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
-def create_book(book: Book, user_id: str = Depends(get_current_user)):
+@router.post("", status_code=status.HTTP_201_CREATED, response_model=BookPublic)
+def create_book(
+    book: Book,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user),
+):
     print(f"User {user_id} is creating a book.")
-    global next_id
-    books_db[next_id] = book
-    current_id = next_id
-    next_id += 1
-    return {"id": current_id, "book": book}
+    new_book = BookDB(**book.model_dump())
+    db.add(new_book)
+    db.commit()
+    db.refresh(new_book)
+    return new_book
 
 
 @router.get("/{book_id}", response_model=BookPublic)
-def get_book(book: Book = Depends(get_book_or_404)):
+def get_book(book: BookDB = Depends(get_book_or_404)):
     return book
 
 
@@ -127,35 +135,50 @@ def get_books_list(
     pg: PaginationParams = Depends(pagination),
     author: str | None = None,
     year: int | None = None,
+    db: Session = Depends(get_db),
 ):
-    books = list(books_db.values())
-    books = [
-        book
-        for book in books
-        if (author is None or book.author == author)
-        and (year is None or book.year == year)
-    ]
-    return books[pg.offset : pg.offset + pg.limit]
+    stmt = select(BookDB)
+    if author is not None:
+        stmt = stmt.where(BookDB.author == author)
+    if year is not None:
+        stmt = stmt.where(BookDB.year == year)
+    stmt = stmt.offset(pg.offset).limit(pg.limit)
+    return db.scalars(stmt).all()
 
 
-@router.put("/{book_id}")
+@router.put("/{book_id}", response_model=BookPublic)
 def update_book(
-    book_id: int, new_book: Book, existing_book: Book = Depends(get_book_or_404)
+    book_id: int,
+    new_book: Book,
+    existing: BookDB = Depends(get_book_or_404),
+    db: Session = Depends(get_db),
 ):
-    books_db[book_id] = new_book
-    return {"id": book_id, "book": new_book}
+    for field, value in new_book.model_dump().items():
+        setattr(existing, field, value)
+    db.commit()
+    db.refresh(existing)
+    return existing
 
 
-@router.patch("/{book_id}")
+@router.patch("/{book_id}", response_model=BookPublic)
 def patch_book(
-    book_id: int, updates: BookUpdate, existing: Book = Depends(get_book_or_404)
+    book_id: int,
+    updates: BookUpdate,
+    existing: BookDB = Depends(get_book_or_404),
+    db: Session = Depends(get_db),
 ):
     updated_dict = updates.model_dump(exclude_unset=True)
-    updated = existing.model_copy(update=updated_dict)
-    books_db[book_id] = updated
-    return updated
+    for field, value in updated_dict.items():
+        setattr(existing, field, value)
+    db.commit()
+    db.refresh(existing)
+    return existing
 
 
 @router.delete("/{book_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_book(book_id: int, existing: Book = Depends(get_book_or_404)):
-    del books_db[book_id]
+def delete_book(
+    existing: BookDB = Depends(get_book_or_404),
+    db: Session = Depends(get_db),
+):
+    db.delete(existing)
+    db.commit()
