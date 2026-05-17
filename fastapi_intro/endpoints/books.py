@@ -2,8 +2,8 @@ from fastapi import APIRouter, status, HTTPException, Depends, Header
 from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from sqlalchemy import select
-from sqlalchemy.orm import Session
-from services.database import get_db, BookDB
+from sqlalchemy.orm import Session, selectinload, joinedload
+from services.database import get_db, BookDB, AuthorDB, TagDB
 
 
 class Book(BaseModel):
@@ -72,11 +72,27 @@ class BookUpdate(BaseModel):
         return v.strip()
 
 
+class AuthorPublic(BaseModel):
+    id: int
+    name: str
+    country: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class TagPublic(BaseModel):
+    id: int
+    name: str
+
+    model_config = {"from_attributes": True}
+
+
 class BookPublic(BaseModel):
     id: int
     title: str
-    author: str
     year: int
+    author: AuthorPublic
+    tags: list[TagPublic]
 
     model_config = {"from_attributes": True}
 
@@ -111,6 +127,31 @@ def get_current_user(x_user_id: str | None = Header(default=None)):
     return x_user_id
 
 
+def get_or_create_author(db: Session, name: str) -> AuthorDB:
+    stmt = select(AuthorDB).where(AuthorDB.name == name)
+    author = db.scalars(stmt).first()
+    if author is None:
+        author = AuthorDB(name=name)
+        db.add(author)
+        db.flush()
+    return author
+
+
+def get_or_create_tags(db: Session, tag_names: list[str]) -> list[TagDB]:
+    if not tag_names:
+        return []
+    stmt = select(TagDB).where(TagDB.name.in_(tag_names))
+    existing = list(db.scalars(stmt).all())
+    existing_names = {tag.name for tag in existing}
+    new_names = [name for name in tag_names if name not in existing_names]
+    new_tags = [TagDB(name=name) for name in new_names]
+    for tag in new_tags:
+        db.add(tag)
+    if new_tags:
+        db.flush()
+    return existing + new_tags
+
+
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=BookPublic)
 def create_book(
     book: Book,
@@ -118,7 +159,16 @@ def create_book(
     user_id: str = Depends(get_current_user),
 ):
     print(f"User {user_id} is creating a book.")
-    new_book = BookDB(**book.model_dump())
+
+    author = get_or_create_author(db, book.author)
+    tags = get_or_create_tags(db, book.tags)
+
+    new_book = BookDB(
+        title=book.title,
+        year=book.year,
+        author=author,
+        tags=tags,
+    )
     db.add(new_book)
     db.commit()
     db.refresh(new_book)
@@ -126,7 +176,21 @@ def create_book(
 
 
 @router.get("/{book_id}", response_model=BookPublic)
-def get_book(book: BookDB = Depends(get_book_or_404)):
+def get_book(book_id: int, db: Session = Depends(get_db)):
+    stmt = (
+        select(BookDB)
+        .where(BookDB.id == book_id)
+        .options(
+            joinedload(BookDB.author),
+            selectinload(BookDB.tags),
+        )
+    )
+    book = db.scalars(stmt).first()
+    if book is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No book found for id {book_id}.",
+        )
     return book
 
 
@@ -137,24 +201,32 @@ def get_books_list(
     year: int | None = None,
     db: Session = Depends(get_db),
 ):
-    stmt = select(BookDB)
+    stmt = select(BookDB).options(joinedload(BookDB.author), selectinload(BookDB.tags))
     if author is not None:
-        stmt = stmt.where(BookDB.author == author)
+        stmt = stmt.join(AuthorDB).where(AuthorDB.name == author)
     if year is not None:
         stmt = stmt.where(BookDB.year == year)
     stmt = stmt.offset(pg.offset).limit(pg.limit)
-    return db.scalars(stmt).all()
+    return db.scalars(stmt).unique().all()
 
 
 @router.put("/{book_id}", response_model=BookPublic)
 def update_book(
     book_id: int,
     new_book: Book,
-    existing: BookDB = Depends(get_book_or_404),
     db: Session = Depends(get_db),
 ):
-    for field, value in new_book.model_dump().items():
-        setattr(existing, field, value)
+    existing = db.get(BookDB, book_id)
+    if existing is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No book found with id {book_id}",
+        )
+    existing.title = new_book.title
+    existing.year = new_book.year
+    existing.author = get_or_create_author(db, new_book.author)
+    existing.tags = get_or_create_tags(db, new_book.tags)
+
     db.commit()
     db.refresh(existing)
     return existing
@@ -164,12 +236,26 @@ def update_book(
 def patch_book(
     book_id: int,
     updates: BookUpdate,
-    existing: BookDB = Depends(get_book_or_404),
     db: Session = Depends(get_db),
 ):
+    existing = db.get(BookDB, book_id)
+
+    if existing is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No book found with id {book_id}",
+        )
+
     updated_dict = updates.model_dump(exclude_unset=True)
-    for field, value in updated_dict.items():
-        setattr(existing, field, value)
+    if "title" in updated_dict:
+        existing.title = updated_dict["title"]
+    if "year" in updated_dict:
+        existing.year = updated_dict["year"]
+    if "author" in updated_dict:
+        existing.author = get_or_create_author(db, updated_dict["author"])
+    if "tags" in updated_dict:
+        existing.tags = get_or_create_tags(db, updated_dict["tags"])
+
     db.commit()
     db.refresh(existing)
     return existing
@@ -177,8 +263,14 @@ def patch_book(
 
 @router.delete("/{book_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_book(
-    existing: BookDB = Depends(get_book_or_404),
+    book_id: int,
     db: Session = Depends(get_db),
 ):
+    existing = db.get(BookDB, book_id)
+    if existing is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No book found with id {book_id}",
+        )
     db.delete(existing)
     db.commit()
